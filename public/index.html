@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GitHub Roast Lab</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="intro">
+        <div>
+          <h1>GitHub Roast Lab</h1>
+        </div>
+        <p class="lede">Type a GitHub username and get a friendly roast grounded in their actual public repositories.</p>
+      </section>
+
+      <section class="workspace" aria-label="Roast generator">
+        <form id="roast-form" class="control-panel">
+          <label for="username">GitHub username</label>
+          <div class="input-row">
+            <input id="username" name="username" autocomplete="off" placeholder="torvalds" required>
+            <button type="submit">Roast</button>
+          </div>
+
+          <label for="style">Roast style</label>
+          <select id="style" name="style">
+            <option value="friendly chaos">Friendly chaos</option>
+            <option value="corporate jargon">Corporate jargon</option>
+            <option value="pirate">Pirate</option>
+            <option value="haiku">Haiku</option>
+            <option value="overly dramatic movie trailer">Movie trailer</option>
+          </select>
+        </form>
+
+        <article id="result" class="result-panel" aria-live="polite">
+          <div class="empty-state">
+            <span>@</span>
+            <p>Awaiting a username with public repos and emotional resilience.</p>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/script.js"></script>
+  </body>
+</html>
