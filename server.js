@@ -309,12 +309,8 @@ function buildPrompt({ profile, repos, summary, style }) {
 function requireCompleteText(text, provider) {
   const normalized = String(text || "").trim();
 
-  if (!normalized) {
+  if (!normalized || normalized.length < 10) {
     throw new Error(`${provider}_EMPTY_RESPONSE`);
-  }
-
-  if (!/[.!?)]$/.test(normalized)) {
-    throw new Error(`${provider}_INCOMPLETE_RESPONSE`);
   }
 
   return normalized;
@@ -523,7 +519,9 @@ Tiny compliment: at least something runs.
 /* ---------------- SMART LLM ROUTER ---------------- */
 async function generateRoast(payload) {
   const providerErrors = [];
+  const messages = buildPrompt(payload);
 
+  // 1. DEMO MODE (hard override only)
   if (DEMO_MODE) {
     return {
       roast: fallbackRoast(payload),
@@ -532,9 +530,7 @@ async function generateRoast(payload) {
     };
   }
 
-  const messages = buildPrompt(payload);
-
-  // try OpenAI first
+  // 2. OpenAI
   if (process.env.OPENAI_API_KEY) {
     try {
       return {
@@ -543,11 +539,10 @@ async function generateRoast(payload) {
       };
     } catch (e) {
       providerErrors.push(`openai: ${e.message}`);
-      console.warn("OpenAI failed:", e.message);
     }
   }
 
-  // try Anthropic
+  // 3. Anthropic
   if (process.env.ANTHROPIC_API_KEY) {
     try {
       return {
@@ -556,25 +551,24 @@ async function generateRoast(payload) {
       };
     } catch (e) {
       providerErrors.push(`anthropic: ${e.message}`);
-      console.warn("Anthropic failed:", e.message);
     }
   }
 
-  // try Gemini
+  // 4. Gemini
   if (process.env.GEMINI_API_KEY) {
     try {
       return {
         roast: await callGemini(messages),
-        source: "gemini",
-        providerErrors
+        source: "gemini"
       };
     } catch (e) {
       providerErrors.push(`gemini: ${e.message}`);
-      console.warn("Gemini failed:", e.message);
     }
   }
 
-  // guaranteed fallback
+  // 5. FINAL FALLBACK (only if ALL fail or no keys)
+  console.warn("LLM errors:", providerErrors);
+
   return {
     roast: fallbackRoast(payload),
     source: "local-fallback",
