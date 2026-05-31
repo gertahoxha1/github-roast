@@ -12,10 +12,18 @@ function loadLocalEnv() {
     if (!trimmed || trimmed.startsWith("#")) continue;
 
     const equalsAt = trimmed.indexOf("=");
-    if (equalsAt === -1) continue;
+    const colonAt = trimmed.indexOf(":");
+    const separatorAt =
+      equalsAt === -1
+        ? colonAt
+        : colonAt === -1
+          ? equalsAt
+          : Math.min(equalsAt, colonAt);
 
-    const key = trimmed.slice(0, equalsAt).trim();
-    let value = trimmed.slice(equalsAt + 1).trim();
+    if (separatorAt === -1) continue;
+
+    const key = trimmed.slice(0, separatorAt).trim();
+    let value = trimmed.slice(separatorAt + 1).trim();
 
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
@@ -24,7 +32,7 @@ function loadLocalEnv() {
       value = value.slice(1, -1);
     }
 
-    if (key && !process.env[key]) {
+    if (key) {
       process.env[key] = value;
     }
   }
@@ -38,8 +46,12 @@ const port = process.env.PORT || 3000;
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const DEMO_MODE = ["1", "true", "yes", "on"].includes(
   String(process.env.DEMO_MODE || "").toLowerCase()
+);
+const DEBUG_LLM = ["1", "true", "yes", "on"].includes(
+  String(process.env.DEBUG_LLM || "").toLowerCase()
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -189,17 +201,21 @@ async function fetchGithubJson(url) {
 
   if (!response.ok) {
     const text = await response.text();
-    return { status: response.status, error: text };
+    let message = text;
+
+    try {
+      message = JSON.parse(text).message || text;
+    } catch {
+      // GitHub usually returns JSON errors, but keep the raw text if it does not.
+    }
+
+    return { status: response.status, data: null, error: message };
   }
 
   return { status: 200, data: await response.json() };
 }
 
 async function getPublicRepos(username) {
-  if (DEMO_MODE) {
-    return makeDemoGithubData(username);
-  }
-
   const userUrl = `https://api.github.com/users/${encodeURIComponent(username)}`;
   const userResult = await fetchGithubJson(userUrl);
 
@@ -208,7 +224,19 @@ async function getPublicRepos(username) {
   }
 
   if (!userResult.data) {
-    return { ok: false, status: 500, message: "GitHub user fetch failed." };
+    if (DEMO_MODE) {
+      return {
+        ...makeDemoGithubData(username),
+        githubSource: "demo-fallback",
+        githubError: userResult.error || "GitHub user fetch failed."
+      };
+    }
+
+    return {
+      ok: false,
+      status: userResult.status || 500,
+      message: userResult.error || "GitHub user fetch failed."
+    };
   }
 
   const repoUrl = `https://api.github.com/users/${encodeURIComponent(
@@ -218,7 +246,19 @@ async function getPublicRepos(username) {
   const repoResult = await fetchGithubJson(repoUrl);
 
   if (!repoResult.data) {
-    return { ok: false, status: 500, message: "Repo fetch failed." };
+    if (DEMO_MODE) {
+      return {
+        ...makeDemoGithubData(username),
+        githubSource: "demo-fallback",
+        githubError: repoResult.error || "Repo fetch failed."
+      };
+    }
+
+    return {
+      ok: false,
+      status: repoResult.status || 500,
+      message: repoResult.error || "Repo fetch failed."
+    };
   }
 
   const repos = repoResult.data.map(repoSummary);
@@ -236,7 +276,8 @@ async function getPublicRepos(username) {
       createdAt: userResult.data.created_at
     },
     repos,
-    summary: summarizeRepos(repos)
+    summary: summarizeRepos(repos),
+    githubSource: "github-api"
   };
 }
 
@@ -250,7 +291,7 @@ function buildPrompt({ profile, repos, summary, style }) {
     {
       role: "system",
       content:
-        "You write playful, accurate roasts of GitHub profiles. Never invent data. Keep it light and not harmful. 2 short paragraphs + tiny compliment."
+        "You write playful, accurate roasts of GitHub profiles. Never invent data. Keep it light and not harmful. Write complete sentences only and never stop mid-sentence. Return 2 short paragraphs plus one final short compliment."
     },
     {
       role: "user",
@@ -265,6 +306,20 @@ function buildPrompt({ profile, repos, summary, style }) {
 }
 
 /* ---------------- LLM CALLS ---------------- */
+function requireCompleteText(text, provider) {
+  const normalized = String(text || "").trim();
+
+  if (!normalized) {
+    throw new Error(`${provider}_EMPTY_RESPONSE`);
+  }
+
+  if (!/[.!?)]$/.test(normalized)) {
+    throw new Error(`${provider}_INCOMPLETE_RESPONSE`);
+  }
+
+  return normalized;
+}
+
 async function callOpenAI(messages) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -296,7 +351,7 @@ async function callOpenAI(messages) {
     throw new Error("OPENAI_ERROR");
   }
 
-  return data.choices?.[0]?.message?.content?.trim();
+  return requireCompleteText(data.choices?.[0]?.message?.content, "OPENAI");
 }
 
 async function callAnthropic(messages) {
@@ -330,7 +385,76 @@ async function callAnthropic(messages) {
     throw new Error("ANTHROPIC_ERROR");
   }
 
-  return data.content?.map((c) => c.text).join("").trim();
+  return requireCompleteText(
+    data.content?.map((c) => c.text).join(""),
+    "ANTHROPIC"
+  );
+}
+
+async function callGemini(messages) {
+  const [system, user] = messages;
+  const model = GEMINI_MODEL.replace(/^models\//, "");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: system.content }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: user.content }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.8,
+        maxOutputTokens: 900,
+        thinkingConfig: {
+          thinkingBudget: 0
+        }
+      }
+    })
+  });
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const apiMessage =
+      data?.error?.message ||
+      data?.error?.status ||
+      JSON.stringify(data) ||
+      `HTTP ${res.status}`;
+    const msg = JSON.stringify(data);
+
+    if (
+      msg.includes("API_KEY_INVALID") ||
+      msg.includes("quota") ||
+      msg.includes("429") ||
+      msg.includes("invalid authentication")
+    ) {
+      throw new Error(`GEMINI_AUTH_OR_QUOTA: ${apiMessage}`);
+    }
+
+    throw new Error(`GEMINI_ERROR: ${apiMessage}`);
+  }
+
+  const candidate = data.candidates?.[0];
+
+  if (candidate?.finishReason && candidate.finishReason !== "STOP") {
+    throw new Error(`GEMINI_FINISH_REASON: ${candidate.finishReason}`);
+  }
+
+  return requireCompleteText(
+    candidate?.content?.parts?.map((part) => part.text || "").join(""),
+    "GEMINI"
+  );
 }
 
 /* ---------------- LOCAL DEMO ROAST ---------------- */
@@ -388,7 +512,7 @@ Tiny compliment: the plot has momentum.
   }
 
   return `
-${name} has ${repos.length} repos — enough to look busy but not enough to start a tech revolution.
+${name} has ${repos.length} repos - enough to look busy but not enough to start a tech revolution.
 
 Their top repo "${top.name}" has ${top.stars || 0} stars, which is either hidden genius or very supportive friends.
 
@@ -398,10 +522,13 @@ Tiny compliment: at least something runs.
 
 /* ---------------- SMART LLM ROUTER ---------------- */
 async function generateRoast(payload) {
+  const providerErrors = [];
+
   if (DEMO_MODE) {
     return {
       roast: fallbackRoast(payload),
-      source: "demo"
+      source: "demo",
+      providerErrors
     };
   }
 
@@ -415,6 +542,7 @@ async function generateRoast(payload) {
         source: "openai"
       };
     } catch (e) {
+      providerErrors.push(`openai: ${e.message}`);
       console.warn("OpenAI failed:", e.message);
     }
   }
@@ -427,14 +555,30 @@ async function generateRoast(payload) {
         source: "anthropic"
       };
     } catch (e) {
+      providerErrors.push(`anthropic: ${e.message}`);
       console.warn("Anthropic failed:", e.message);
+    }
+  }
+
+  // try Gemini
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      return {
+        roast: await callGemini(messages),
+        source: "gemini",
+        providerErrors
+      };
+    } catch (e) {
+      providerErrors.push(`gemini: ${e.message}`);
+      console.warn("Gemini failed:", e.message);
     }
   }
 
   // guaranteed fallback
   return {
     roast: fallbackRoast(payload),
-    source: "local-fallback"
+    source: "local-fallback",
+    providerErrors
   };
 }
 
@@ -460,7 +604,8 @@ app.post("/api/roast", async (req, res) => {
       ...github,
       roast: generated.roast,
       roastSource: generated.source,
-      demoMode: DEMO_MODE
+      demoMode: DEMO_MODE,
+      ...(DEBUG_LLM ? { providerErrors: generated.providerErrors } : {})
     });
   } catch (err) {
     console.error(err);
